@@ -7,44 +7,43 @@ TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 SITES = [
-    {
-        'name': '고연',
-        'url': 'https://www.goyeon.or.kr/bbs/board.php?bo_table=notice',
-    },
-    {
-        'name': '스카이웰',
-        'url': 'https://www.skywell.or.kr/bbs/board.php?bo_table=idea',
-    },
-    {
-        'name': '부산대_기공',
-        'url': 'https://me.pusan.ac.kr/new/sub05/sub01_05.php',
-    }
+    {'name': '고연', 'url': 'https://www.goyeon.or.kr/bbs/board.php?bo_table=notice'},
+    {'name': '스카이웰', 'url': 'https://www.skywell.or.kr/bbs/board.php?bo_table=idea'},
+    {'name': '부산대_기공', 'url': 'https://me.pusan.ac.kr/new/sub05/sub01_05.php'}
 ]
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    requests.post(url, json={'chat_id': CHAT_ID, 'text': text}, timeout=10)
+    try:
+        requests.post(url, json={'chat_id': CHAT_ID, 'text': text}, timeout=10)
+    except:
+        pass
 
 def check_updates():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        # 실제 브라우저와 똑같이 보이도록 설정 강화
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080},
-            locale="ko-KR"
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={'width': 1280, 'height': 800}
         )
-        
-        # [핵심] 헤드리스 브라우저임을 들키지 않게 하는 스크립트 주입
+        # 봇 감지 우회 스크립트
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         for site in SITES:
             page = context.new_page()
             try:
-                # 고연의 경우 더 정교한 로딩 대기 필요
+                # 1. 페이지 접속 및 '네트워크 조용해질 때까지' 대기
+                print(f"[{site['name']}] 접속 시도 중...")
                 page.goto(site['url'], wait_until="networkidle", timeout=60000)
-                time.sleep(5) 
                 
+                # 2. 특정 요소가 나타날 때까지 명시적 대기 (최대 10초)
+                # 게시판 테이블이나 특정 클래스가 나타날 때까지 기다립니다.
+                try:
+                    page.wait_for_selector("table", timeout=10000)
+                except:
+                    pass
+                
+                time.sleep(3) # 추가 렌더링 시간
                 title = ""
                 
                 if site['name'] == '부산대_기공':
@@ -52,31 +51,37 @@ def check_updates():
                     for row in rows:
                         if 'notice' in row.inner_html() or 'icon_notice' in row.inner_html():
                             continue
-                        target_link = row.query_selector('td.title.left a')
-                        if target_link:
-                            title = target_link.inner_text().strip()
+                        link = row.query_selector('td.title.left a')
+                        if link:
+                            title = link.inner_text().strip()
                             break
                 else:
-                    # 고연/스카이웰: 링크 패턴 분석을 통한 추출
-                    # 모든 <a> 태그를 가져와서 wr_id가 포함된 첫 번째 '진짜 제목'을 찾음
-                    links = page.query_selector_all('a')
-                    for link in links:
-                        href = link.get_attribute('href') or ""
-                        txt = link.inner_text().strip()
-                        
-                        # 그누보드 특유의 게시글 링크 패턴
-                        if 'wr_id=' in href and len(txt) > 5:
-                            # 번호, 날짜, 조회수 등이 아닌 한글 제목인지 확인
-                            if any(c >= '가' and c <= '힣' for c in txt):
+                    # 고연 / 스카이웰 공통: 가장 유연한 방식
+                    # 'td' 태그 중에서 제목일 확률이 높은 클래스들을 다 뒤집니다.
+                    selectors = ['.td_subject a', '.subject a', 'td.title a', 'div.tit a']
+                    for sel in selectors:
+                        target = page.query_selector(sel)
+                        if target:
+                            txt = target.inner_text().strip()
+                            if len(txt) > 2 and '공지' not in txt:
+                                title = txt
+                                break
+                    
+                    # 만약 위 방법으로도 실패하면, wr_id가 포함된 모든 링크 중 첫 번째를 잡습니다.
+                    if not title:
+                        links = page.query_selector_all("a[href*='wr_id=']")
+                        for l in links:
+                            txt = l.inner_text().strip()
+                            if len(txt) > 4 and not txt.isdigit():
                                 title = txt
                                 break
 
                 if title:
                     title = title.replace('새글', '').strip()
-                    db_file = f"last_{site['name']}_ultra_v2.txt" # 기록 초기화를 위해 이름 변경
+                    db_file = f"last_{site['name']}_final_v3.txt"
                     
                     if not os.path.exists(db_file):
-                        send_telegram(f"✅ [{site['name']}] 감시 시작\n📌 현재글: {title}")
+                        send_telegram(f"🚀 [{site['name']}] 모니터링 시작\n📌 현재글: {title}")
                         with open(db_file, "w", encoding='utf-8') as f:
                             f.write(title)
                     else:
@@ -87,7 +92,9 @@ def check_updates():
                             with open(db_file, "w", encoding='utf-8') as f:
                                 f.write(title)
                 else:
-                    print(f"[{site['name']}] 추출 실패 - 사이트가 내용을 숨기고 있음")
+                    # 디버깅용: 실패 시 현재 페이지의 제목이라도 출력
+                    page_title = page.title()
+                    print(f"[{site['name']}] 추출 실패 (페이지 제목: {page_title})")
             
             except Exception as e:
                 print(f"[{site['name']}] 에러: {str(e)}")
