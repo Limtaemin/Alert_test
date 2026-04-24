@@ -1,5 +1,6 @@
 import os
 import time
+import random
 from playwright.sync_api import sync_playwright
 import requests
 
@@ -21,29 +22,39 @@ def send_telegram(text):
 
 def check_updates():
     with sync_playwright() as p:
+        # 브라우저 실행 설정 강화
         browser = p.chromium.launch(headless=True)
+        
+        # 실제 한국인이 사용하는 윈도우 크롬 환경을 완벽 복사
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={'width': 1280, 'height': 800}
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080},
+            locale="ko-KR",
+            timezone_id="Asia/Seoul",
+            ignore_https_errors=True # 부산대 SSL 에러 해결용
         )
-        # 봇 감지 우회 스크립트
+
+        # 봇 감지 변수 무력화
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         for site in SITES:
             page = context.new_page()
             try:
-                # 1. 페이지 접속 및 '네트워크 조용해질 때까지' 대기
-                print(f"[{site['name']}] 접속 시도 중...")
-                page.goto(site['url'], wait_until="networkidle", timeout=60000)
+                print(f"[{site['name']}] 접속 시도...")
                 
-                # 2. 특정 요소가 나타날 때까지 명시적 대기 (최대 10초)
-                # 게시판 테이블이나 특정 클래스가 나타날 때까지 기다립니다.
-                try:
-                    page.wait_for_selector("table", timeout=10000)
-                except:
-                    pass
+                # 구글에서 클릭해서 들어온 것처럼 속이기 (Referer 주입)
+                page.set_extra_http_headers({
+                    "Referer": "https://www.google.com/",
+                    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+                })
+
+                # 페이지 이동
+                page.goto(site['url'], wait_until="domcontentloaded", timeout=60000)
                 
-                time.sleep(3) # 추가 렌더링 시간
+                # 사람처럼 보이게 하기 위해 잠시 대기 후 마우스 살짝 움직임
+                time.sleep(random.uniform(3, 6))
+                page.mouse.move(random.randint(100, 500), random.randint(100, 500))
+                
                 title = ""
                 
                 if site['name'] == '부산대_기공':
@@ -56,32 +67,25 @@ def check_updates():
                             title = link.inner_text().strip()
                             break
                 else:
-                    # 고연 / 스카이웰 공통: 가장 유연한 방식
-                    # 'td' 태그 중에서 제목일 확률이 높은 클래스들을 다 뒤집니다.
-                    selectors = ['.td_subject a', '.subject a', 'td.title a', 'div.tit a']
+                    # 고연/스카이웰: 더 끈질기게 찾기
+                    # 1. 일반적인 제목 태그 시도
+                    selectors = ['.td_subject a', 'td.subject a', '.tit a', 'a[href*="wr_id="]']
                     for sel in selectors:
-                        target = page.query_selector(sel)
-                        if target:
-                            txt = target.inner_text().strip()
-                            if len(txt) > 2 and '공지' not in txt:
+                        elements = page.query_selector_all(sel)
+                        for el in elements:
+                            txt = el.inner_text().strip()
+                            # 5글자 이상, 숫자가 아닌 한글 제목인 경우만 인정
+                            if len(txt) > 4 and any(c >= '가' and c <= '힣' for c in txt):
                                 title = txt
                                 break
-                    
-                    # 만약 위 방법으로도 실패하면, wr_id가 포함된 모든 링크 중 첫 번째를 잡습니다.
-                    if not title:
-                        links = page.query_selector_all("a[href*='wr_id=']")
-                        for l in links:
-                            txt = l.inner_text().strip()
-                            if len(txt) > 4 and not txt.isdigit():
-                                title = txt
-                                break
+                        if title: break
 
                 if title:
                     title = title.replace('새글', '').strip()
-                    db_file = f"last_{site['name']}_final_v3.txt"
+                    db_file = f"last_{site['name']}_ultra_final.txt"
                     
                     if not os.path.exists(db_file):
-                        send_telegram(f"🚀 [{site['name']}] 모니터링 시작\n📌 현재글: {title}")
+                        send_telegram(f"🛡️ [{site['name']}] 하이퍼 감시 가동\n📌 현재글: {title}")
                         with open(db_file, "w", encoding='utf-8') as f:
                             f.write(title)
                     else:
@@ -92,9 +96,8 @@ def check_updates():
                             with open(db_file, "w", encoding='utf-8') as f:
                                 f.write(title)
                 else:
-                    # 디버깅용: 실패 시 현재 페이지의 제목이라도 출력
-                    page_title = page.title()
-                    print(f"[{site['name']}] 추출 실패 (페이지 제목: {page_title})")
+                    p_title = page.title()
+                    print(f"[{site['name']}] 내용 추출 실패 (상태: {p_title})")
             
             except Exception as e:
                 print(f"[{site['name']}] 에러: {str(e)}")
