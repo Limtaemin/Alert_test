@@ -3,7 +3,6 @@ from bs4 import BeautifulSoup
 import os
 import urllib3
 
-# 학교 사이트 SSL 에러 방지
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
@@ -13,17 +12,19 @@ SITES = [
     {
         'name': '고연',
         'url': 'https://www.goyeon.or.kr/bbs/board.php?bo_table=notice',
-        'selector': '.td_subject a, .bo_tit a' # 여러 패턴 시도
+        # 태민님이 찾은 경로에서 순서만 뺀 공통 경로
+        'selector': 'td.td_subject div a' 
     },
     {
         'name': '스카이웰',
         'url': 'https://www.skywell.or.kr/bbs/board.php?bo_table=idea',
-        'selector': '.td_subject a, .bo_tit a'
+        'selector': 'td.td_subject a'
     },
     {
         'name': '부산대_기공',
         'url': 'https://me.pusan.ac.kr/new/sub05/sub01_05.php',
-        'selector': 'td.subject a'
+        # 태민님이 찾은 경로의 핵심 부분
+        'selector': '.board-list02 table tbody tr' 
     }
 ]
 
@@ -32,29 +33,35 @@ def send_telegram(text):
     requests.post(url, json={'chat_id': CHAT_ID, 'text': text}, timeout=10)
 
 def check_updates():
-    # 최대한 일반 브라우저처럼 보이게 설정
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
-    }
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
     
     for site in SITES:
         try:
-            # verify=False로 학교 사이트 SSL 에러 해결
             res = requests.get(site['url'], headers=headers, timeout=30, verify=False)
             soup = BeautifulSoup(res.content, 'html.parser')
             
-            # 태그 찾기
-            target = soup.select_one(site['selector'])
-            
-            if target:
-                title = target.get_text(strip=True)
-                # 제목에서 '공지', '새글' 등 불필요한 단어 정리
-                title = title.replace('공지', '').replace('새글', '').strip()
-                
+            title = ""
+            if site['name'] == '부산대_기공':
+                # 부산대는 공지사항이 아닌 첫 번째 일반 게시글을 찾습니다.
+                rows = soup.select(site['selector'])
+                for row in rows:
+                    # '공지' 아이콘이나 텍스트가 없는 행을 찾음
+                    is_notice = row.select_one('img[src*="icon_notice.gif"]') or '공지' in row.text
+                    if not is_notice:
+                        link = row.select_one('td.title.left a')
+                        if link:
+                            title = link.get_text(strip=True)
+                            break
+            else:
+                # 고연, 스카이웰은 첫 번째 요소를 가져오되 공백 정리
+                target = soup.select_one(site['selector'])
+                if target:
+                    title = target.get_text(strip=True)
+
+            if title:
+                title = title.replace('새글', '').strip()
                 db_file = f"last_{site['name']}.txt"
                 
-                # 처음 감시 시작할 때 파일 생성 및 알림
                 if not os.path.exists(db_file):
                     send_telegram(f"✅ [{site['name']}] 감시 시작!\n현재글: {title}")
                     with open(db_file, "w", encoding='utf-8') as f:
@@ -68,12 +75,11 @@ def check_updates():
                     send_telegram(f"🔔 [{site['name']}] 새 글!\n📌 {title}\n🔗 {site['url']}")
                     with open(db_file, "w", encoding='utf-8') as f:
                         f.write(title)
-                else:
-                    print(f"[{site['name']}] 변동 없음")
             else:
-                print(f"[{site['name']}] 태그 찾기 실패 - 사이트 구조 확인 필요")
+                print(f"[{site['name']}] 제목 추출 실패")
+                
         except Exception as e:
-            print(f"[{site['name']}] 에러 발생: {str(e)}")
+            print(f"[{site['name']}] 에러: {str(e)}")
 
 if __name__ == "__main__":
     check_updates()
