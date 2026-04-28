@@ -9,8 +9,7 @@ jobs:
   monitor:
     runs-on: ubuntu-latest
     permissions:
-      issues: write  # ← 이 줄 추가! (Issue 생성 권한)
-      contents: write  # ← 이 줄 추가! (파일 수정 권한)
+      contents: write
     
     steps:
       - uses: actions/checkout@v3
@@ -25,7 +24,8 @@ jobs:
       
       - name: Monitor Sites
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # ← 이 줄 추가!
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python << 'EOF'
           import requests
@@ -34,21 +34,20 @@ jobs:
           import hashlib
           import re
           from datetime import datetime
-          import subprocess
           import os
           
           STATE_FILE = 'monitor_state.json'
+          TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+          TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
           
           def clean_html(html):
               """조회수, 시간 등 동적 요소 제거"""
               soup = BeautifulSoup(html, 'html.parser')
               
-              # 스크립트, 스타일 제거
               for script in soup(['script', 'style']):
                   script.decompose()
               
               text = soup.get_text()
-              # 조회수 제거
               text = re.sub(r'조회수[:\s]*\d+', '', text)
               text = re.sub(r'\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}', '', text)
               text = re.sub(r'\s+', ' ', text)
@@ -65,6 +64,23 @@ jobs:
           def save_state(state):
               with open(STATE_FILE, 'w', encoding='utf-8') as f:
                   json.dump(state, f, ensure_ascii=False, indent=2)
+          
+          def send_telegram(message):
+              """텔레그램으로 메시지 전송"""
+              try:
+                  url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                  data = {
+                      'chat_id': TELEGRAM_CHAT_ID,
+                      'text': message,
+                      'parse_mode': 'HTML'
+                  }
+                  response = requests.post(url, json=data)
+                  if response.status_code == 200:
+                      print(f"✅ 텔레그램 전송 성공")
+                  else:
+                      print(f"❌ 텔레그램 전송 실패: {response.text}")
+              except Exception as e:
+                  print(f"❌ 오류: {str(e)}")
           
           def check_site(url, state):
               try:
@@ -103,30 +119,20 @@ jobs:
                   print(f"❌ 오류: {str(e)}")
                   return False
           
-          def create_issue(url):
-              title = f"🚨 사이트 변화: {url}"
-              body = f"**사이트:** {url}\n**시간:** {datetime.now().isoformat()}"
-              
-              try:
-                  result = subprocess.run([
-                      'gh', 'issue', 'create',
-                      '--title', title,
-                      '--body', body
-                  ], capture_output=True, text=True)
-                  
-                  if result.returncode == 0:
-                      print(f"✅ Issue 생성됨")
-                  else:
-                      print(f"❌ Issue 생성 실패: {result.stderr}")
-              except Exception as e:
-                  print(f"❌ 오류: {str(e)}")
-          
           # 메인 실행
           state = load_state()
           
           for url in state.keys():
               if check_site(url, state):
-                  create_issue(url)
+                  message = f"""
+          🚨 <b>사이트 변화 감지!</b>
+          
+          <b>URL:</b> {url}
+          <b>시간:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+          
+          확인하러 가기: {url}
+                  """
+                  send_telegram(message)
           
           save_state(state)
           print("\n✅ 완료!")
