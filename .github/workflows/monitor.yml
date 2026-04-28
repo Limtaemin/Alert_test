@@ -2,10 +2,7 @@ name: Site Monitor
 
 on:
   schedule:
-    # 매 시간 정각에 실행 (한국시간 기준 +9시간)
-    - cron: '0 * * * *'
-  
-  # 수동 실행 옵션
+    - cron: '0 * * * *'  # 매시간 실행
   workflow_dispatch:
 
 jobs:
@@ -13,37 +10,186 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: 저장소 체크아웃
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
       
-      - name: Python 설정
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: '3.11'
       
-      - name: 의존성 설치
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests beautifulsoup4
       
-      - name: Chrome 설치
+      - name: Monitor Sites
         run: |
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser
+          python << 'EOF'
+          import requests
+          from bs4 import BeautifulSoup
+          import json
+          import hashlib
+          import re
+          from datetime import datetime
+          
+          # 모니터링할 사이트들
+          SITES = """
+          https://pusan.ac.kr
+          https://jaedan.or.kr
+          """.strip().split('\n')
+          
+          STATE_FILE = 'monitor_state.json'
+          
+          # 1️⃣ 동적 요소 제거 (조회수, 시간 등)
+          def clean_html(html):
+              """조회수, 타임스탬프 등 동적 요소 제거"""
+              soup = BeautifulSoup(html, 'html.parser')
+              
+              # 조회수 관련 요소 제거
+              for element in soup.find_all(['span', 'td', 'div']):
+                  text = element.get_text()
+                  # 조회수, 조회, views 등 제거
+                  if any(keyword in text for keyword in ['조회수', '조회', 'views', 'view']):
+                      if element.find_parent('tr') or element.find_parent('table'):
+                          element.string = ''
+              
+              # 스크립트와 스타일 제거
+              for script in soup(['script', 'style']):
+                  script.decompose()
+              
+              # 공백 정리
+              text = soup.get_text()
+              text = re.sub(r'\s+', ' ', text)
+              text = re.sub(r'조회수\s*\d+', '', text)
+              text = re.sub(r'\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}', '', text)
+              
+              return text.strip()
+          
+          # 2️⃣ 중요한 내용만 추출 (제목, 날짜)
+          def extract_important_content(html):
+              """공지사항 제목과 날짜만 추출"""
+              soup = BeautifulSoup(html, 'html.parser')
+              content = []
+              
+              # 테이블 행 찾기
+              for row in soup.find_all('tr'):
+                  cells = row.find_all(['td', 'th'])
+                  if len(cells) >= 2:
+                      # 제목과 날짜 추출
+                      row_text = ' | '.join([cell.get_text(strip=True) for cell in cells[:3]])
+                      # 조회수 제거
+                      row_text = re.sub(r'\d{3,}$', '', row_text)  # 끝의 숫자(조회수) 제거
+                      if row_text.strip():
+                          content.append(row_text)
+              
+              return content
+          
+          # 3️⃣ 상태 파일 로드
+          def load_state():
+              try:
+                  with open(STATE_FILE, 'r', encoding='utf-8') as f:
+                      return json.load(f)
+              except:
+                  return {}
+          
+          # 4️⃣ 상태 파일 저장
+          def save_state(state):
+              with open(STATE_FILE, 'w', encoding='utf-8') as f:
+                  json.dump(state, f, ensure_ascii=False, indent=2)
+          
+          # 5️⃣ 변화 감지 및 Issue 생성
+          def check_site(url, state):
+              try:
+                  print(f"\n🔍 확인 중: {url}")
+                  response = requests.get(url, timeout=10)
+                  response.encoding = 'utf-8'
+                  current_html = response.text
+                  
+                  # 중요한 내용만 추출
+                  current_content = extract_important_content(current_html)
+                  current_hash = hashlib.md5(
+                      '\n'.join(current_content).encode()
+                  ).hexdigest()
+                  
+                  previous_hash = state.get(url, {}).get('hash')
+                  
+                  if previous_hash is None:
+                      print(f"✅ 첫 모니터링: {url}")
+                      state[url] = {
+                          'hash': current_hash,
+                          'last_checked': datetime.now().isoformat(),
+                          'status': 'initialized'
+                      }
+                  elif current_hash != previous_hash:
+                      print(f"🚨 변화 감지: {url}")
+                      state[url] = {
+                          'hash': current_hash,
+                          'last_checked': datetime.now().isoformat(),
+                          'status': 'changed'
+                      }
+                      return True  # 변화 있음
+                  else:
+                      print(f"✅ 변화 없음: {url}")
+                      state[url]['last_checked'] = datetime.now().isoformat()
+                  
+                  return False
+              
+              except Exception as e:
+                  print(f"❌ 오류: {url} - {str(e)}")
+                  return False
+          
+          # 6️⃣ GitHub Issue 생성
+          def create_issue(url, token):
+              import subprocess
+              
+              title = f"🚨 사이트 변화 감지: {url}"
+              body = f"""
+          ## 변화 감지됨
+          
+          **사이트:** {url}
+          **감지 시간:** {datetime.now().isoformat()}
+          
+          사이트에 새로운 공지사항이나 변화가 있습니다!
+          
+          [사이트 방문](https://{url.replace('https://', '')})
+              """
+              
+              try:
+                  result = subprocess.run([
+                      'gh', 'issue', 'create',
+                      '--title', title,
+                      '--body', body
+                  ], capture_output=True, text=True)
+                  
+                  if result.returncode == 0:
+                      print(f"✅ Issue 생성됨: {title}")
+                  else:
+                      print(f"⚠️ Issue 생성 실패: {result.stderr}")
+              except Exception as e:
+                  print(f"❌ Issue 생성 오류: {str(e)}")
+          
+          # 7️⃣ 메인 실행
+          state = load_state()
+          changes_detected = False
+          
+          for site in SITES:
+              site = site.strip()
+              if site:
+                  if check_site(site, state):
+                      changes_detected = True
+                      create_issue(site, "${{ secrets.GITHUB_TOKEN }}")
+          
+          save_state(state)
+          
+          print("\n" + "="*50)
+          print(f"✅ 모니터링 완료!")
+          print(f"📊 상태: {json.dumps(state, ensure_ascii=False, indent=2)}")
+          
+          EOF
       
-      - name: 모니터링 실행
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python site_monitor.py --reset
-        timeout-minutes: 10
-      
-      - name: 상태 파일 커밋
+      - name: Commit changes
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add monitor_state.json
-          git commit -m "Update monitor state" || echo "No changes to commit"
+          git commit -m "Update monitor state - $(date)" || true
           git push
-        continue-on-error: true
