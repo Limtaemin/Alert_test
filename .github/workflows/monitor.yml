@@ -37,6 +37,7 @@ jobs:
           import os
           
           STATE_FILE = 'monitor_state.json'
+          CONFIG_FILE = 'sites_config.json'
           TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
           TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
           
@@ -53,6 +54,14 @@ jobs:
               text = re.sub(r'\s+', ' ', text)
               
               return text.strip()
+          
+          def load_config():
+              try:
+                  with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                      return json.load(f)
+              except:
+                  print("❌ sites_config.json 파일을 찾을 수 없습니다!")
+                  return {"sites": []}
           
           def load_state():
               try:
@@ -82,9 +91,9 @@ jobs:
               except Exception as e:
                   print(f"❌ 오류: {str(e)}")
           
-          def check_site(url, state):
+          def check_site(site_name, url, state):
               try:
-                  print(f"\n🔍 확인: {url}")
+                  print(f"\n🔍 확인: {site_name} ({url})")
                   response = requests.get(url, timeout=10)
                   response.encoding = 'utf-8'
                   current_html = response.text
@@ -97,6 +106,7 @@ jobs:
                   if previous_hash == "" or previous_hash is None:
                       print(f"✅ 첫 모니터링")
                       state[url] = {
+                          'name': site_name,
                           'hash': current_hash,
                           'last_checked': datetime.now().isoformat(),
                           'status': 'initialized'
@@ -105,6 +115,7 @@ jobs:
                   elif current_hash != previous_hash:
                       print(f"🚨 변화 감지!")
                       state[url] = {
+                          'name': site_name,
                           'hash': current_hash,
                           'last_checked': datetime.now().isoformat(),
                           'status': 'changed'
@@ -120,13 +131,24 @@ jobs:
                   return False
           
           # 메인 실행
+          config = load_config()
           state = load_state()
           
-          for url in state.keys():
-              if check_site(url, state):
+          print(f"📋 모니터링할 사이트: {len(config['sites'])}개")
+          
+          for site in config['sites']:
+              site_name = site.get('name', 'Unknown')
+              url = site.get('url')
+              
+              if not url:
+                  print(f"⚠️ {site_name}: URL이 없습니다!")
+                  continue
+              
+              if check_site(site_name, url, state):
                   message = f"""
           🚨 <b>사이트 변화 감지!</b>
           
+          <b>사이트:</b> {site_name}
           <b>URL:</b> {url}
           <b>시간:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
           
