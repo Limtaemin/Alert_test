@@ -8,6 +8,9 @@ on:
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write  # ← 이 줄 추가! (Issue 생성 권한)
+      contents: write  # ← 이 줄 추가! (파일 수정 권한)
     
     steps:
       - uses: actions/checkout@v3
@@ -18,10 +21,11 @@ jobs:
           python-version: '3.11'
       
       - name: Install dependencies
-        run: |
-          pip install requests beautifulsoup4
+        run: pip install requests beautifulsoup4
       
       - name: Monitor Sites
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # ← 이 줄 추가!
         run: |
           python << 'EOF'
           import requests
@@ -30,60 +34,27 @@ jobs:
           import hashlib
           import re
           from datetime import datetime
-          
-          # 모니터링할 사이트들
-          SITES = """
-          https://pusan.ac.kr
-          https://jaedan.or.kr
-          """.strip().split('\n')
+          import subprocess
+          import os
           
           STATE_FILE = 'monitor_state.json'
           
-          # 1️⃣ 동적 요소 제거 (조회수, 시간 등)
           def clean_html(html):
-              """조회수, 타임스탬프 등 동적 요소 제거"""
+              """조회수, 시간 등 동적 요소 제거"""
               soup = BeautifulSoup(html, 'html.parser')
               
-              # 조회수 관련 요소 제거
-              for element in soup.find_all(['span', 'td', 'div']):
-                  text = element.get_text()
-                  # 조회수, 조회, views 등 제거
-                  if any(keyword in text for keyword in ['조회수', '조회', 'views', 'view']):
-                      if element.find_parent('tr') or element.find_parent('table'):
-                          element.string = ''
-              
-              # 스크립트와 스타일 제거
+              # 스크립트, 스타일 제거
               for script in soup(['script', 'style']):
                   script.decompose()
               
-              # 공백 정리
               text = soup.get_text()
-              text = re.sub(r'\s+', ' ', text)
-              text = re.sub(r'조회수\s*\d+', '', text)
+              # 조회수 제거
+              text = re.sub(r'조회수[:\s]*\d+', '', text)
               text = re.sub(r'\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}', '', text)
+              text = re.sub(r'\s+', ' ', text)
               
               return text.strip()
           
-          # 2️⃣ 중요한 내용만 추출 (제목, 날짜)
-          def extract_important_content(html):
-              """공지사항 제목과 날짜만 추출"""
-              soup = BeautifulSoup(html, 'html.parser')
-              content = []
-              
-              # 테이블 행 찾기
-              for row in soup.find_all('tr'):
-                  cells = row.find_all(['td', 'th'])
-                  if len(cells) >= 2:
-                      # 제목과 날짜 추출
-                      row_text = ' | '.join([cell.get_text(strip=True) for cell in cells[:3]])
-                      # 조회수 제거
-                      row_text = re.sub(r'\d{3,}$', '', row_text)  # 끝의 숫자(조회수) 제거
-                      if row_text.strip():
-                          content.append(row_text)
-              
-              return content
-          
-          # 3️⃣ 상태 파일 로드
           def load_state():
               try:
                   with open(STATE_FILE, 'r', encoding='utf-8') as f:
@@ -91,67 +62,50 @@ jobs:
               except:
                   return {}
           
-          # 4️⃣ 상태 파일 저장
           def save_state(state):
               with open(STATE_FILE, 'w', encoding='utf-8') as f:
                   json.dump(state, f, ensure_ascii=False, indent=2)
           
-          # 5️⃣ 변화 감지 및 Issue 생성
           def check_site(url, state):
               try:
-                  print(f"\n🔍 확인 중: {url}")
+                  print(f"\n🔍 확인: {url}")
                   response = requests.get(url, timeout=10)
                   response.encoding = 'utf-8'
                   current_html = response.text
                   
-                  # 중요한 내용만 추출
-                  current_content = extract_important_content(current_html)
-                  current_hash = hashlib.md5(
-                      '\n'.join(current_content).encode()
-                  ).hexdigest()
+                  current_clean = clean_html(current_html)
+                  current_hash = hashlib.md5(current_clean.encode()).hexdigest()
                   
                   previous_hash = state.get(url, {}).get('hash')
                   
-                  if previous_hash is None:
-                      print(f"✅ 첫 모니터링: {url}")
+                  if previous_hash == "" or previous_hash is None:
+                      print(f"✅ 첫 모니터링")
                       state[url] = {
                           'hash': current_hash,
                           'last_checked': datetime.now().isoformat(),
                           'status': 'initialized'
                       }
+                      return False
                   elif current_hash != previous_hash:
-                      print(f"🚨 변화 감지: {url}")
+                      print(f"🚨 변화 감지!")
                       state[url] = {
                           'hash': current_hash,
                           'last_checked': datetime.now().isoformat(),
                           'status': 'changed'
                       }
-                      return True  # 변화 있음
+                      return True
                   else:
-                      print(f"✅ 변화 없음: {url}")
+                      print(f"✅ 변화 없음")
                       state[url]['last_checked'] = datetime.now().isoformat()
-                  
-                  return False
+                      return False
               
               except Exception as e:
-                  print(f"❌ 오류: {url} - {str(e)}")
+                  print(f"❌ 오류: {str(e)}")
                   return False
           
-          # 6️⃣ GitHub Issue 생성
-          def create_issue(url, token):
-              import subprocess
-              
-              title = f"🚨 사이트 변화 감지: {url}"
-              body = f"""
-          ## 변화 감지됨
-          
-          **사이트:** {url}
-          **감지 시간:** {datetime.now().isoformat()}
-          
-          사이트에 새로운 공지사항이나 변화가 있습니다!
-          
-          [사이트 방문](https://{url.replace('https://', '')})
-              """
+          def create_issue(url):
+              title = f"🚨 사이트 변화: {url}"
+              body = f"**사이트:** {url}\n**시간:** {datetime.now().isoformat()}"
               
               try:
                   result = subprocess.run([
@@ -161,28 +115,21 @@ jobs:
                   ], capture_output=True, text=True)
                   
                   if result.returncode == 0:
-                      print(f"✅ Issue 생성됨: {title}")
+                      print(f"✅ Issue 생성됨")
                   else:
-                      print(f"⚠️ Issue 생성 실패: {result.stderr}")
+                      print(f"❌ Issue 생성 실패: {result.stderr}")
               except Exception as e:
-                  print(f"❌ Issue 생성 오류: {str(e)}")
+                  print(f"❌ 오류: {str(e)}")
           
-          # 7️⃣ 메인 실행
+          # 메인 실행
           state = load_state()
-          changes_detected = False
           
-          for site in SITES:
-              site = site.strip()
-              if site:
-                  if check_site(site, state):
-                      changes_detected = True
-                      create_issue(site, "${{ secrets.GITHUB_TOKEN }}")
+          for url in state.keys():
+              if check_site(url, state):
+                  create_issue(url)
           
           save_state(state)
-          
-          print("\n" + "="*50)
-          print(f"✅ 모니터링 완료!")
-          print(f"📊 상태: {json.dumps(state, ensure_ascii=False, indent=2)}")
+          print("\n✅ 완료!")
           
           EOF
       
@@ -191,5 +138,5 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add monitor_state.json
-          git commit -m "Update monitor state - $(date)" || true
+          git commit -m "Update monitor state" || true
           git push
