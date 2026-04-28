@@ -1,17 +1,1 @@
-{
-  "https://me.pusan.ac.kr/new/sub05/sub01_05.php": {
-    "hash": "",
-    "last_checked": "",
-    "status": "initialized"
-  },
-  "https://www.skywell.or.kr/bbs/board.php?bo_table=idea": {
-    "hash": "",
-    "last_checked": "",
-    "status": "initialized"
-  },
-  "https://www.goyeon.or.kr/bbs/board.php?bo_table=notice": {        // ← 여기 추가!
-    "hash": "",
-    "last_checked": "",
-    "status": "initialized"
-  }
-}
+{}
